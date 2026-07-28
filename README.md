@@ -14,7 +14,7 @@ crate centralizes that sequence once instead of re-implementing it at every call
 
 ```toml
 [dependencies]
-stellar-rust-client = "0.1"
+stellar-rust-client = "0.2.0"
 ```
 
 Requires Rust 1.85+ (edition 2024, inherited from this crate's `Cargo.toml`).

@@ -5,6 +5,8 @@ edition = "2024"
 description = "Reusable utils for Soroban contract execution: wasm upload, deploy, invoke, read."
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/gauc073/stellar-rust-client"
+homepage = "https://github.com/gauc073/stellar-rust-client"
 keywords = ["stellar", "soroban", "blockchain", "smart-contracts"]
 categories = ["api-bindings", "cryptography::cryptocurrencies"]
 
