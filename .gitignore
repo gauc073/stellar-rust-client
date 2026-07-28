@@ -1,0 +1,9 @@
+/target
+/data
+default.txt
+*.decrypted
+output.txt
+*.export.json
+.dep-age-cache.json
+
+.idea
