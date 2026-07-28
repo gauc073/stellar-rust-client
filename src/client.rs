@@ -1,53 +1,67 @@
 use crate::config::{NetworkConfig, PollConfig};
 use crate::error::Result;
-use crate::signer::Signer;
+use crate::signer::{SignerConfig, SignerFactory};
 use soroban_client::transaction::ScVal;
 use soroban_client::{Options, Server};
 
 /// Top-level entry point. Holds the RPC connection, network config, and a
-/// pluggable `Signer`. Roughly equivalent to `MultiContractDeployer` in the
-/// TS source, minus the deployment-log bookkeeping (out of scope -- see
-/// design doc §7.2) and with the Fireblocks-vs-local branching replaced by
-/// the `Signer` trait object.
+/// `SignerFactory` -- not a `Signer` directly. Roughly equivalent to
+/// `MultiContractDeployer` in the TS source, minus the deployment-log
+/// bookkeeping (out of scope -- see design doc §7.2).
+///
+/// The signer is deliberately *not* held as a ready-to-use `Signer` for the
+/// `Client`'s whole lifetime. Every write method below builds a transient
+/// `Signer` via `signer_factory.build_signer()` immediately before signing
+/// and lets it drop immediately after -- see `signer::SignerFactory` for
+/// why that matters.
 pub struct Client {
     server: Server,
     network: NetworkConfig,
-    signer: Box<dyn Signer>,
+    signer_factory: Box<dyn SignerFactory>,
+    public_key: String,
     poll_cfg: PollConfig,
 }
 
 impl Client {
-    pub fn new(network: NetworkConfig, signer: Box<dyn Signer>) -> Result<Self> {
-        Self::with_poll_config(network, signer, PollConfig::default())
+    pub async fn new(network: NetworkConfig, signer_config: SignerConfig) -> Result<Self> {
+        Self::with_poll_config(network, signer_config, PollConfig::default()).await
     }
 
-    pub fn with_poll_config(
+    pub async fn with_poll_config(
         network: NetworkConfig,
-        signer: Box<dyn Signer>,
+        signer_config: SignerConfig,
         poll_cfg: PollConfig,
     ) -> Result<Self> {
         let server = Server::new(&network.rpc_url, Options::default())?;
+        let signer_factory = signer_config.into_factory()?;
+        // Resolved once here, not re-derived on every call -- a public key
+        // isn't secret, and for a custodial signer this may cost a network
+        // round trip (e.g. resolving a Fireblocks vault's address).
+        let public_key = signer_factory.public_key().await?;
         Ok(Self {
             server,
             network,
-            signer,
+            signer_factory,
+            public_key,
             poll_cfg,
         })
     }
 
     pub fn public_key(&self) -> &str {
-        self.signer.public_key()
+        &self.public_key
     }
 
     pub async fn upload_wasm(&self, wasm: &[u8]) -> Result<[u8; 32]> {
+        let signer = self.signer_factory.build_signer().await?;
         crate::deploy::upload_wasm(
             &self.server,
             &self.network.network_passphrase,
-            self.signer.as_ref(),
+            signer.as_ref(),
             wasm,
             self.poll_cfg,
         )
         .await
+        // `signer` drops here, right after use.
     }
 
     pub async fn create_contract_instance(
@@ -55,10 +69,11 @@ impl Client {
         wasm_hash: [u8; 32],
         constructor_args: Vec<ScVal>,
     ) -> Result<String> {
+        let signer = self.signer_factory.build_signer().await?;
         crate::deploy::create_contract_instance(
             &self.server,
             &self.network.network_passphrase,
-            self.signer.as_ref(),
+            signer.as_ref(),
             wasm_hash,
             constructor_args,
             self.poll_cfg,
@@ -71,15 +86,14 @@ impl Client {
         wasm: &[u8],
         constructor_args: Vec<ScVal>,
     ) -> Result<(String, [u8; 32])> {
-        crate::deploy::deploy_contract(
-            &self.server,
-            &self.network.network_passphrase,
-            self.signer.as_ref(),
-            wasm,
-            constructor_args,
-            self.poll_cfg,
-        )
-        .await
+        // Two separate transient signers (one per submitted transaction),
+        // not one shared across both steps -- consistent with "build fresh,
+        // use once, drop" everywhere else.
+        let wasm_hash = self.upload_wasm(wasm).await?;
+        let contract_address = self
+            .create_contract_instance(wasm_hash, constructor_args)
+            .await?;
+        Ok((contract_address, wasm_hash))
     }
 
     pub async fn invoke_contract(
@@ -88,10 +102,11 @@ impl Client {
         function_name: &str,
         args: Vec<ScVal>,
     ) -> Result<crate::invoke::InvokeOutcome> {
+        let signer = self.signer_factory.build_signer().await?;
         crate::invoke::invoke_contract(
             &self.server,
             &self.network.network_passphrase,
-            self.signer.as_ref(),
+            signer.as_ref(),
             contract_address,
             function_name,
             args,
@@ -106,10 +121,12 @@ impl Client {
         function_name: &str,
         args: Vec<ScVal>,
     ) -> Result<ScVal> {
+        // Read-only: no signer needed at all, just the public key as the
+        // simulation source account.
         crate::read::read_contract(
             &self.server,
             &self.network.network_passphrase,
-            self.signer.public_key(),
+            &self.public_key,
             contract_address,
             function_name,
             args,

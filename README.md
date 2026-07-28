@@ -22,12 +22,13 @@ Requires Rust 1.85+ (edition 2024, inherited from this crate's `Cargo.toml`).
 ## Quick start
 
 ```rust,no_run
-use stellar_rust_client::{Client, LocalSigner, NetworkConfig};
+use secrecy::SecretString;
+use stellar_rust_client::{Client, InvokeOutcome, NetworkConfig, SignerConfig, utils};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let signer = LocalSigner::from_secret("S...")?;
-    let client = Client::new(NetworkConfig::testnet(), Box::new(signer))?;
+    let signer_config = SignerConfig::Secret(SecretString::from("S...".to_string()));
+    let client = Client::new(NetworkConfig::testnet(), signer_config).await?;
 
     // Deploy
     let wasm = stellar_rust_client::wasm::read_wasm_file("./my_contract.wasm")?;
@@ -41,8 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("balance: {result:?}");
 
     // Write (submits + polls until confirmed)
-    use stellar_rust_client::{InvokeOutcome, scval};
-    let args = vec![scval::address("GABC...")?, scval::i128_val(1_000_000)];
+    let args = vec![utils::address("GABC...")?, utils::i128_val(1_000_000)];
     match client.invoke_contract(&contract_address, "set_balance", args).await? {
         InvokeOutcome::Executed { tx_hash } => println!("confirmed: {tx_hash}"),
         InvokeOutcome::SkippedNoStateChange(msg) => println!("no-op: {msg}"),
@@ -63,17 +63,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `txbuilder` | The shared `build → prepare (simulate+assemble) → sign → send` and `build → simulate` helpers every other module calls into, so that sequence exists exactly once. Returns `(tx_hash, response)`. |
 | `poll` | Fixed-interval polling of `getTransaction` until it leaves `NotFound`. |
 | `fee` | `recommended_inclusion_fee` — asks the network's fee-stats endpoint for a realistic inclusion fee instead of always bidding the 100-stroop floor. Used automatically by `deploy` and `invoke`. |
-| `scval` | `ScVal` construction/extraction helpers for common primitives (address, string, symbol, bytes, bool, i32/u32/i64/u64/i128/u128) — namespaced as `scval::` rather than re-exported at the crate root. |
-| `signer` | `Signer` trait + `LocalSigner` (plain keypair). See below. |
+| `utils` | `ScVal` construction/extraction helpers for common primitives (address, string, symbol, bytes, bool, i32/u32/i64/u64/i128/u128) — namespaced as `utils::` rather than re-exported at the crate root. |
+| `signer` | `Signer`, `SignerFactory`, `SignerConfig`, `LocalSigner`. See below. |
 | `wasm` | `read_wasm_file` — sync file read. |
 | `error` | `SorobanUtilsError` — one error enum for the whole crate. |
 | `config` | `NetworkConfig` (testnet/futurenet/mainnet/custom) and `PollConfig` (interval + timeout). |
 
 ## Signing
 
-`Client` takes a `Box<dyn Signer>`:
+`Client::new` takes a `SignerConfig`, not a signer directly:
 
 ```rust
+pub enum SignerConfig {
+    /// A plain secret key, wrapped in `secrecy::SecretString`.
+    Secret(secrecy::SecretString),
+    /// Anything else -- a custodial signer (Fireblocks, Turnkey, an HSM, a
+    /// remote signing service), implemented downstream and passed in here.
+    Custom(Box<dyn SignerFactory>),
+}
+```
+
+`Client` stores the resulting `Box<dyn SignerFactory>`, not a ready-to-use `Signer`. Every write
+method (`upload_wasm`, `create_contract_instance`, `invoke_contract`) calls
+`signer_factory.build_signer().await` immediately before signing and lets the result drop
+immediately after -- so whatever secret material a `Signer` holds is only in memory for the
+duration of one signing operation, not the `Client`'s whole lifetime. That matters more than it
+might sound: in a long-lived process like a Lambda execution environment that gets frozen and
+thawed between invocations, "whole lifetime" can be a long time.
+
+```rust
+#[async_trait::async_trait]
+pub trait SignerFactory: Send + Sync {
+    async fn public_key(&self) -> Result<String>;         // resolved once, at Client::new
+    async fn build_signer(&self) -> Result<Box<dyn Signer>>;  // called fresh per transaction
+}
+
 #[async_trait::async_trait]
 pub trait Signer: Send + Sync {
     fn public_key(&self) -> &str;
@@ -81,12 +105,22 @@ pub trait Signer: Send + Sync {
 }
 ```
 
-`LocalSigner` (plain `Keypair`, from a secret key or generated at random) is the only
-implementation shipped in this crate. A custodial/remote signer (Fireblocks or similar) is meant
-to be implemented downstream — in whatever crate holds the vendor SDK and API credentials — and
-just needs to satisfy `Signer` to plug into `Client`. Keeping that out of this crate is
-deliberate: it avoids pulling custodial vendor SDKs and credentials into a crate meant to be
-published and reused elsewhere.
+`SignerConfig::Secret` covers the plain-keypair case out of the box (backed internally by
+`LocalSigner`, still exported if you want to build one directly). A custodial/remote signer is
+implemented downstream, in whatever crate holds the vendor SDK and credentials, by implementing
+`SignerFactory` and passing it in as `SignerConfig::Custom(...)`. Deliberately not a named variant
+per vendor (no `Fireblocks` in this crate's public API) — this is a crate meant to be published
+and reused broadly, and adding a new signing backend later should never require a new release of
+it.
+
+**On the security guarantee, stated plainly:** `secrecy::SecretString` guarantees the *stored*
+secret zeroizes on drop and never accidentally prints via `{:?}`. The transient
+`soroban_client::Keypair` rebuilt fresh inside `build_signer` for each sign call, however, is a
+foreign type this crate doesn't control — it doesn't implement `Zeroize`, so its raw key bytes
+aren't guaranteed to be scrubbed the instant it's dropped, only deallocated. What this design
+does guarantee is a much smaller exposure window (one sign call instead of the `Client`'s whole
+lifetime) and that the long-lived copy is handled properly. Full memory-scrubbing of the
+ephemeral `Keypair` itself would need an upstream change in `soroban-client`.
 
 ## Polling
 
@@ -167,29 +201,29 @@ than failing the whole operation — worth keeping an eye on `fee::recommended_i
 result in your Lambda's logs (or call it directly) if you want visibility into which path is
 being taken.
 
-## `scval` helpers
+## `utils` helpers
 
 `ScVal` construction and extraction for the common primitive types, extracted from what used to
 be copy-pasted `sc_address`/`sc_string` helpers in the test files:
 
 ```rust
-use stellar_rust_client::scval;
+use stellar_rust_client::utils;
 
 let args = vec![
-    scval::address("GABC...")?,
-    scval::string("some string")?,
-    scval::symbol("SOME_ROLE")?,       // max 32 chars, protocol-enforced
-    scval::i128_val(1_000_000_000),
-    scval::u128_val(140),
-    scval::boolean(true),
+    utils::address("GABC...")?,
+    utils::string("some string")?,
+    utils::symbol("SOME_ROLE")?,       // max 32 chars, protocol-enforced
+    utils::i128_val(1_000_000_000),
+    utils::u128_val(140),
+    utils::boolean(true),
 ];
 
 // and the reverse direction:
-let addr: String = scval::to_address(&result)?;
-let amount: i128 = scval::to_i128(&result)?;
+let addr: String = utils::to_address(&result)?;
+let amount: i128 = utils::to_i128(&result)?;
 ```
 
-Namespaced under `scval::` rather than re-exported at the crate root, since names like
+Namespaced under `utils::` rather than re-exported at the crate root, since names like
 `i128`/`u128`/`bool` would otherwise shadow Rust's own primitive types. This deliberately only
 covers primitives — `Vec`/`Map`/struct-shaped `ScVal`s are still on you via `soroban_client::xdr`
 directly, since a generic converter for those would just be a worse copy of what `soroban-client`
@@ -198,15 +232,22 @@ already does.
 ## Known rough edges to check before relying on this in production
 
 - Contract-address decoding (`ScVal::Address` → `C...` strkey in `deploy::create_contract_instance`
-  and `scval::to_address`) relies on `Address`'s `Display`/`to_string()`. You've tested read and
+  and `utils::to_address`) relies on `Address`'s `Display`/`to_string()`. You've tested read and
   write against live contracts already, so this is presumably fine — flagging only because
   strkey-encoding mistakes are the kind of bug that's easy to miss until compared against Stellar
   Explorer.
-- `scval::to_bytes` / `scval::to_string_val` / `scval::to_symbol` assume the underlying XDR
+- `utils::to_bytes` / `utils::to_string_val` / `utils::to_symbol` assume the underlying XDR
   wrapper types (`BytesM`, `StringM`) support `.to_vec()` via a slice `Deref`. Wasn't able to
   compile-check this session (no Rust toolchain in this sandbox) — if `cargo build` flags it,
   the fix is a one-line `.clone().into()` swap, same pattern already proven working in
   `deploy::upload_wasm`.
+- `Client::new` is now `async` and takes `SignerConfig` instead of `Box<dyn Signer>` — this is a
+  breaking change from what you already integrated into your Lambda. Update that call site before
+  redeploying: `SignerConfig::Secret(SecretString::from(your_secret))` replaces
+  `Box::new(LocalSigner::from_secret(...)?)`, and the call becomes `.await`-ed.
+- Wasn't able to compile-check the `secrecy` API surface this session either (no crates.io access
+  in this sandbox) — `SecretString`/`ExposeSecret` are the right names as of `secrecy` 0.10, but
+  worth a glance at that crate's changelog if `cargo build` disagrees.
 - Before running `cargo publish`, double check the `stellar-rust-client` name is still available
   on crates.io (didn't get a chance to verify this session) and that `cargo package --list` /
   `cargo publish --dry-run` doesn't pick up anything from `.env`, `BUILD_NOTES.md`'s reference

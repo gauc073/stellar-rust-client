@@ -22,8 +22,8 @@
 //! CONTRACT_ADDRESS_CORECONTRACT=C...
 //! ```
 
-use secrecy::ExposeSecret;
-use stellar_rust_client::{Client, LocalSigner, NetworkConfig};
+use secrecy::{ExposeSecret, SecretString};
+use stellar_rust_client::{Client, NetworkConfig, SignerConfig};
 
 pub fn network_config() -> NetworkConfig {
     match std::env::var("NETWORK").as_deref() {
@@ -39,7 +39,10 @@ pub fn network_config() -> NetworkConfig {
     }
 }
 
-pub fn client() -> Client {
+/// `Client::new` is now async (resolving a custodial signer's public key
+/// may need a network round trip), so this is async too -- call sites need
+/// `.await`.
+pub async fn client() -> Client {
     let data_b64 =
         std::env::var("data").expect("Please set data in your .env (deployer/caller secret key)");
     let password_b64 = std::env::var("password")
@@ -47,8 +50,10 @@ pub fn client() -> Client {
     let values = data_security::decrypt_export_to_map(&data_b64, &password_b64).unwrap();
     let key_name = "SOURCE_SECRET".to_string();
     let secret: &str = values.get(&key_name).unwrap().expose_secret();
-    let signer = LocalSigner::from_secret(&secret).expect("invalid SOURCE_SECRET");
-    Client::new(network_config(), Box::new(signer)).expect("failed to build Client")
+    let signer_config = SignerConfig::Secret(SecretString::from(secret.to_string()));
+    Client::new(network_config(), signer_config)
+        .await
+        .expect("failed to build Client")
 }
 
 /// Reads `CONTRACT_ADDRESS_<NAME>` (name upper-cased, matching the TS

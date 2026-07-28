@@ -13,7 +13,7 @@ use stellar_rust_client::{ScVal, utils};
 #[ignore = "hits live testnet RPC; run with `cargo test -- --ignored`"]
 async fn checks_has_role_across_contracts() {
     common::load_env();
-    let client = common::client();
+    let client = common::client().await;
 
     // Please add contract names here -- must match CONTRACT_ADDRESS_<NAME> env vars.
     let contracts = ["CoreContract"];

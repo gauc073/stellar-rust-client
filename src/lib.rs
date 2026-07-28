@@ -9,12 +9,13 @@
 //!
 //! Quick start:
 //! ```ignore
-//! use stellar_rust_client::{Client, NetworkConfig, LocalSigner};
+//! use secrecy::SecretString;
+//! use stellar_rust_client::{Client, NetworkConfig, SignerConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let signer = LocalSigner::from_secret("S...")?;
-//!     let client = Client::new(NetworkConfig::testnet(), Box::new(signer))?;
+//!     let signer_config = SignerConfig::Secret(SecretString::from("S...".to_string()));
+//!     let client = Client::new(NetworkConfig::testnet(), signer_config).await?;
 //!
 //!     let wasm = stellar_rust_client::wasm::read_wasm_file("./target/wasm32-unknown-unknown/release/my_contract.wasm")?;
 //!     let (contract_address, _wasm_hash) = client.deploy_contract(&wasm, vec![]).await?;
@@ -41,7 +42,7 @@ pub use client::Client;
 pub use config::{NetworkConfig, PollConfig};
 pub use error::{Result, SorobanUtilsError};
 pub use invoke::InvokeOutcome;
-pub use signer::{LocalSigner, Signer};
+pub use signer::{LocalSigner, Signer, SignerConfig, SignerFactory};
 
 // Re-export the pieces of soroban-client that callers will need to
 // construct arguments (ScVal) and interpret results, so downstream crates

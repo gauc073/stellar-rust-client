@@ -12,7 +12,7 @@
 //! copy. Reach for `soroban_client::xdr::ScVal` directly for anything more
 //! complex than what's below.
 //!
-//! Usage is namespaced under `scval::` rather than re-exported at the crate
+//! Usage is namespaced under `utils::` rather than re-exported at the crate
 //! root, since names like `i128`/`u128`/`bool` would otherwise shadow the
 //! primitive types of the same name.
 

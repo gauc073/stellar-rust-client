@@ -20,7 +20,7 @@ const FUNCTION_NAME: &str = "update_price";
 #[ignore = "submits a real transaction on testnet; run with `cargo test -- --ignored`"]
 async fn registers_account_on_register_contract() {
     common::load_env();
-    let client = common::client();
+    let client = common::client().await;
 
     let contract_address = "CC3LP4VY7P2TQGWTTQFSH3COS53FYVUBPXHK77TPPDIUQBVG7GMUWT7U".to_string();
 

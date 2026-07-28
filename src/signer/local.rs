@@ -19,21 +19,25 @@ impl LocalSigner {
     pub fn from_secret(secret: &str) -> Result<Self> {
         let keypair = Keypair::from_secret(secret)
             .map_err(|e| crate::error::SorobanUtilsError::Signer(e.to_string()))?;
-        let public_key = keypair.public_key();
-        Ok(Self {
-            keypair,
-            public_key,
-        })
+        Ok(Self::from_keypair(keypair))
     }
 
     pub fn random() -> Result<Self> {
         let keypair = Keypair::random()
             .map_err(|e| crate::error::SorobanUtilsError::Signer(e.to_string()))?;
+        Ok(Self::from_keypair(keypair))
+    }
+
+    /// Build directly from an already-constructed `Keypair`. Used by
+    /// `SecretSignerFactory` to build a transient `LocalSigner` per
+    /// transaction, so the underlying secret's exposure window is one sign
+    /// call, not the lifetime of the `Client`.
+    pub fn from_keypair(keypair: Keypair) -> Self {
         let public_key = keypair.public_key();
-        Ok(Self {
+        Self {
             keypair,
             public_key,
-        })
+        }
     }
 }
 
