@@ -11,29 +11,10 @@
 
 mod common;
 
-use soroban_client::address::{Address, AddressTrait};
-use soroban_client::xdr::{Int128Parts, ScString};
-use stellar_rust_client::{InvokeOutcome, ScVal};
+use stellar_rust_client::{InvokeOutcome, utils};
 
 // TODO: replace with the real exported function name on RegisterContract.
 const FUNCTION_NAME: &str = "update_price";
-
-fn sc_address(account: &str) -> ScVal {
-    Address::new(account)
-        .expect("invalid account address")
-        .to_sc_val()
-        .expect("failed to encode address as ScVal")
-}
-
-fn sc_string(value: &str) -> ScVal {
-    ScVal::String(ScString(
-        value
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .expect("role name too long for ScString"),
-    ))
-}
 
 #[tokio::test]
 #[ignore = "submits a real transaction on testnet; run with `cargo test -- --ignored`"]
@@ -49,11 +30,8 @@ async fn registers_account_on_register_contract() {
     // to the caller's own address.
     let account_to_register = client.public_key().to_string();
     let args = vec![
-        sc_address(&account_to_register),
-        ScVal::I128("1138328760000000000".to_string().parse().unwrap()),
-        // ScVal::U128("140".to_string().parse().unwrap()),
-        // sc_address(&account_to_register),
-        // sc_string("EXECUTOR_ROLE"),
+        utils::address(&account_to_register).expect("invalid account address"),
+        utils::i128_val(1_138_328_760_000_000_000),
     ];
 
     let outcome = client
@@ -64,8 +42,8 @@ async fn registers_account_on_register_contract() {
         });
 
     match outcome {
-        InvokeOutcome::Executed => println!(
-            "Invoked {FUNCTION_NAME}({account_to_register}) on RegisterContract ({contract_address}) -- transaction confirmed."
+        InvokeOutcome::Executed { tx_hash } => println!(
+            "Invoked {FUNCTION_NAME}({account_to_register}) on RegisterContract ({contract_address}) -- confirmed, tx hash: {tx_hash}"
         ),
         // Simulation succeeded but reported no state change -- e.g. the
         // value being set already matches on-chain state. Not a crash, but

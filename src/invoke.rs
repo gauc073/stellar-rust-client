@@ -1,12 +1,11 @@
 use crate::config::PollConfig;
 use crate::error::{Result, SorobanUtilsError};
+use crate::fee::{self, MIN_BASE_FEE};
 use crate::signer::Signer;
 use crate::txbuilder::{build_and_simulate, prepare_and_send};
 use soroban_client::Server;
 use soroban_client::operation::Operation;
 use soroban_client::transaction::ScVal;
-
-const DEFAULT_FEE: u32 = 100;
 
 /// Outcome of a call to `invoke_contract` that did *not* fail outright.
 ///
@@ -19,8 +18,11 @@ const DEFAULT_FEE: u32 = 100;
 /// etc.) and is now propagated as `Err`, not swallowed.
 #[derive(Debug, Clone)]
 pub enum InvokeOutcome {
-    /// Transaction was submitted and confirmed on-chain.
-    Executed,
+    /// Transaction was submitted and confirmed on-chain. Carries the
+    /// hex-encoded transaction hash (same format Stellar Explorer uses),
+    /// so callers can log it or link straight to an explorer without
+    /// re-deriving it.
+    Executed { tx_hash: String },
     /// Simulation reported no state change; nothing was submitted. The
     /// message is human-readable context for logs/callers, not a full
     /// simulation dump.
@@ -50,13 +52,14 @@ pub async fn invoke_contract(
         .map_err(|e| SorobanUtilsError::Xdr(format!("{:?}", e)))?;
 
     // Simulate first so we can bail out early if there's no state change,
-    // same short-circuit the TS version does.
+    // same short-circuit the TS version does. The fee here is never charged
+    // (simulate_transaction doesn't submit anything), so the floor is fine.
     let simulation = build_and_simulate(
         server,
         network_passphrase,
         signer.public_key(),
         op.clone(),
-        DEFAULT_FEE,
+        MIN_BASE_FEE,
     )
     .await?;
 
@@ -73,16 +76,24 @@ pub async fn invoke_contract(
         return Ok(InvokeOutcome::SkippedNoStateChange(message));
     }
 
-    prepare_and_send(
+    // Ask the network what it actually costs to get included right now,
+    // instead of always bidding the bare minimum -- that's what was causing
+    // transactions to sit in the mempool instead of confirming. Falls back
+    // to the floor if the fee-stats call itself fails.
+    let fee = fee::recommended_inclusion_fee(server)
+        .await
+        .unwrap_or(MIN_BASE_FEE);
+
+    let (tx_hash, _response) = prepare_and_send(
         server,
         network_passphrase,
         signer.public_key(),
         op,
-        DEFAULT_FEE,
+        fee,
         signer,
         poll_cfg,
     )
     .await?;
 
-    Ok(InvokeOutcome::Executed)
+    Ok(InvokeOutcome::Executed { tx_hash })
 }

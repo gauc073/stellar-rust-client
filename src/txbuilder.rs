@@ -19,6 +19,9 @@ use soroban_client::xdr::Operation as XdrOperation;
 /// `Server::prepare_transaction` performs both simulation and assembly in
 /// one RPC round trip (equivalent to the TS
 /// `simulateTransaction` + `rpc.assembleTransaction` pair).
+/// Returns `(tx_hash, response)`. The hash is hex-encoded, matching how
+/// Stellar Explorer / Horizon / the TS SDK display it, so callers can log it
+/// or link straight to an explorer without re-deriving it themselves.
 pub async fn prepare_and_send(
     server: &Server,
     network_passphrase: &str,
@@ -27,7 +30,7 @@ pub async fn prepare_and_send(
     fee: u32,
     signer: &dyn Signer,
     poll_cfg: PollConfig,
-) -> Result<GetTransactionResponse> {
+) -> Result<(String, GetTransactionResponse)> {
     let mut source_account = server.get_account(caller_address).await?;
 
     let transaction: Transaction =
@@ -49,7 +52,8 @@ pub async fn prepare_and_send(
 
     server.send_transaction(signed).await?;
 
-    poll_transaction_status(server, &hash, poll_cfg).await
+    let response = poll_transaction_status(server, &hash, poll_cfg).await?;
+    Ok((hash, response))
 }
 
 /// Read-only path: build, simulate (no send), return the simulation

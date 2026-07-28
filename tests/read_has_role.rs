@@ -7,30 +7,7 @@
 
 mod common;
 
-use soroban_client::address::{Address, AddressTrait};
-use soroban_client::xdr::ScString;
-use stellar_rust_client::ScVal;
-
-/// Build the `address` ScVal argument, equivalent to
-/// `nativeToScVal(account, { type: "address" })` in the TS script.
-fn sc_address(account: &str) -> ScVal {
-    Address::new(account)
-        .expect("invalid account address")
-        .to_sc_val()
-        .expect("failed to encode address as ScVal")
-}
-
-/// Build the `string` ScVal argument, equivalent to
-/// `nativeToScVal(role, { type: "string" })` in the TS script.
-fn sc_string(value: &str) -> ScVal {
-    ScVal::String(ScString(
-        value
-            .as_bytes()
-            .to_vec()
-            .try_into()
-            .expect("role name too long for ScString"),
-    ))
-}
+use stellar_rust_client::{ScVal, utils};
 
 #[tokio::test]
 #[ignore = "hits live testnet RPC; run with `cargo test -- --ignored`"]
@@ -52,7 +29,10 @@ async fn checks_has_role_across_contracts() {
         let contract_address = "CC3LP4VY7P2TQGWTTQFSH3COS53FYVUBPXHK77TPPDIUQBVG7GMUWT7U";
 
         for role in roles {
-            let args = vec![sc_address(&account), sc_string(role)];
+            let args = vec![
+                utils::address(&account).expect("invalid account address"),
+                utils::string(role).expect("role name too long"),
+            ];
 
             let result = client
                 .read_contract(&contract_address, "has_role", args)

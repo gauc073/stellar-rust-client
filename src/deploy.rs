@@ -1,12 +1,11 @@
 use crate::config::PollConfig;
 use crate::error::{Result, SorobanUtilsError};
+use crate::fee::{self, MIN_BASE_FEE};
 use crate::signer::Signer;
 use crate::txbuilder::prepare_and_send;
 use soroban_client::Server;
 use soroban_client::operation::Operation;
 use soroban_client::transaction::ScVal;
-
-const DEFAULT_FEE: u32 = 100; // BASE_FEE equivalent; caller can add a fee param later if needed.
 
 /// Upload a compiled contract WASM blob to the network.
 ///
@@ -23,12 +22,20 @@ pub async fn upload_wasm(
         .upload_wasm(wasm, None)
         .map_err(|e| SorobanUtilsError::Xdr(format!("{:?}", e)))?;
 
-    let response = prepare_and_send(
+    // Ask the network for a realistic inclusion fee instead of always
+    // bidding the floor -- avoids transactions sitting in the mempool
+    // during congestion. Falls back to the floor if the fee-stats call
+    // itself fails.
+    let fee = fee::recommended_inclusion_fee(server)
+        .await
+        .unwrap_or(MIN_BASE_FEE);
+
+    let (_tx_hash, response) = prepare_and_send(
         server,
         network_passphrase,
         signer.public_key(),
         op,
-        DEFAULT_FEE,
+        fee,
         signer,
         poll_cfg,
     )
@@ -71,12 +78,16 @@ pub async fn create_contract_instance(
         .create_contract(deployer, wasm_hash, None, None, constructor_args)
         .map_err(|e| SorobanUtilsError::Xdr(format!("{:?}", e)))?;
 
-    let response = prepare_and_send(
+    let fee = fee::recommended_inclusion_fee(server)
+        .await
+        .unwrap_or(MIN_BASE_FEE);
+
+    let (_tx_hash, response) = prepare_and_send(
         server,
         network_passphrase,
         deployer,
         op,
-        DEFAULT_FEE,
+        fee,
         signer,
         poll_cfg,
     )

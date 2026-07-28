@@ -28,11 +28,13 @@ pub mod client;
 pub mod config;
 pub mod deploy;
 pub mod error;
+pub mod fee;
 pub mod invoke;
 pub mod poll;
 pub mod read;
 pub mod signer;
 pub mod txbuilder;
+pub mod utils;
 pub mod wasm;
 
 pub use client::Client;

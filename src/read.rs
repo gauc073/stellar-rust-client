@@ -1,10 +1,9 @@
 use crate::error::{Result, SorobanUtilsError};
+use crate::fee::MIN_BASE_FEE;
 use crate::txbuilder::build_and_simulate;
 use soroban_client::Server;
 use soroban_client::operation::Operation;
 use soroban_client::transaction::ScVal;
-
-const DEFAULT_FEE: u32 = 100;
 
 /// Simulate a read-only contract call and return the raw `ScVal` result.
 ///
@@ -27,7 +26,7 @@ pub async fn read_contract(
         .map_err(|e| SorobanUtilsError::Xdr(format!("{:?}", e)))?;
 
     let simulation =
-        build_and_simulate(server, network_passphrase, caller_address, op, DEFAULT_FEE).await?;
+        build_and_simulate(server, network_passphrase, caller_address, op, MIN_BASE_FEE).await?;
 
     simulation
         .to_result()

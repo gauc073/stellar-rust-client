@@ -41,9 +41,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("balance: {result:?}");
 
     // Write (submits + polls until confirmed)
-    client
-        .invoke_contract(&contract_address, "set_balance", vec![/* ScVal args */])
-        .await?;
+    use stellar_rust_client::{InvokeOutcome, scval};
+    let args = vec![scval::address("GABC...")?, scval::i128_val(1_000_000)];
+    match client.invoke_contract(&contract_address, "set_balance", args).await? {
+        InvokeOutcome::Executed { tx_hash } => println!("confirmed: {tx_hash}"),
+        InvokeOutcome::SkippedNoStateChange(msg) => println!("no-op: {msg}"),
+    }
 
     Ok(())
 }
@@ -57,8 +60,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `deploy` | `upload_wasm`, `create_contract_instance`, `deploy_contract` (upload + create in one call). |
 | `invoke` | `invoke_contract` — simulates first and skips the on-chain send if simulation reports no state change. |
 | `read` | `read_contract` — simulation-only, never submits a transaction. Returns the raw `ScVal`; native-type conversion is left to the caller. |
-| `txbuilder` | The shared `build → prepare (simulate+assemble) → sign → send` and `build → simulate` helpers every other module calls into, so that sequence exists exactly once. |
+| `txbuilder` | The shared `build → prepare (simulate+assemble) → sign → send` and `build → simulate` helpers every other module calls into, so that sequence exists exactly once. Returns `(tx_hash, response)`. |
 | `poll` | Fixed-interval polling of `getTransaction` until it leaves `NotFound`. |
+| `fee` | `recommended_inclusion_fee` — asks the network's fee-stats endpoint for a realistic inclusion fee instead of always bidding the 100-stroop floor. Used automatically by `deploy` and `invoke`. |
+| `scval` | `ScVal` construction/extraction helpers for common primitives (address, string, symbol, bytes, bool, i32/u32/i64/u64/i128/u128) — namespaced as `scval::` rather than re-exported at the crate root. |
 | `signer` | `Signer` trait + `LocalSigner` (plain keypair). See below. |
 | `wasm` | `read_wasm_file` — sync file read. |
 | `error` | `SorobanUtilsError` — one error enum for the whole crate. |
@@ -122,8 +127,10 @@ TypeScript-to-Rust mapping this crate was ported from.
 
 ```rust
 pub enum InvokeOutcome {
-    /// Transaction was submitted and confirmed on-chain.
-    Executed,
+    /// Transaction was submitted and confirmed on-chain. Carries the
+    /// hex-encoded transaction hash so callers can log it or link straight
+    /// to an explorer without re-deriving it.
+    Executed { tx_hash: String },
     /// Simulation reported no state change; nothing was submitted. Not
     /// necessarily a bug (e.g. an idempotent call that's already in the
     /// desired state) -- inspect the message and decide per call site.
@@ -137,12 +144,69 @@ simulation is `Ok(InvokeOutcome::SkippedNoStateChange(..))` rather than a silent
 on it explicitly if a no-op should be treated as a test/caller failure, the way
 `tests/write_register_contract.rs` does.
 
+`deploy::upload_wasm` / `create_contract_instance` / `deploy_contract` do *not* currently expose
+their transaction hash the same way (they still return `[u8; 32]` / `String` / `(String, [u8;
+32])` unchanged) — only `invoke_contract`'s return type changed, since that's the call site this
+was requested against. Say the word if you want the hash threaded through the deploy path too;
+it's the same shape of change.
+
+## Fee estimation
+
+`deploy::upload_wasm`, `deploy::create_contract_instance`, and `invoke::invoke_contract` now call
+`fee::recommended_inclusion_fee` before submitting, instead of always bidding the 100-stroop
+floor. This asks the RPC node's `getFeeStats` for the 90th-percentile fee actually being paid on
+recent Soroban transactions (`soroban_inclusion_fee`, which is the fee market Soroban transactions
+compete in — separate from the classic per-operation fee market). This is what was causing
+transactions to be accepted by `sendTransaction` but sit in the mempool instead of confirming: the
+resource fee (what the contract execution itself costs) was already being estimated correctly by
+`prepare_transaction`, but the inclusion fee (the bid to get picked up by the next ledger close)
+was always the bare minimum, which loses to any other traffic during congestion.
+
+If the fee-stats call itself fails for some reason, it falls back to the 100-stroop floor rather
+than failing the whole operation — worth keeping an eye on `fee::recommended_inclusion_fee`'s
+result in your Lambda's logs (or call it directly) if you want visibility into which path is
+being taken.
+
+## `scval` helpers
+
+`ScVal` construction and extraction for the common primitive types, extracted from what used to
+be copy-pasted `sc_address`/`sc_string` helpers in the test files:
+
+```rust
+use stellar_rust_client::scval;
+
+let args = vec![
+    scval::address("GABC...")?,
+    scval::string("some string")?,
+    scval::symbol("SOME_ROLE")?,       // max 32 chars, protocol-enforced
+    scval::i128_val(1_000_000_000),
+    scval::u128_val(140),
+    scval::boolean(true),
+];
+
+// and the reverse direction:
+let addr: String = scval::to_address(&result)?;
+let amount: i128 = scval::to_i128(&result)?;
+```
+
+Namespaced under `scval::` rather than re-exported at the crate root, since names like
+`i128`/`u128`/`bool` would otherwise shadow Rust's own primitive types. This deliberately only
+covers primitives — `Vec`/`Map`/struct-shaped `ScVal`s are still on you via `soroban_client::xdr`
+directly, since a generic converter for those would just be a worse copy of what `soroban-client`
+already does.
+
 ## Known rough edges to check before relying on this in production
 
-- Contract-address decoding (`ScVal::Address` → `C...` strkey in `deploy::create_contract_instance`)
-  relies on `Address`'s `Display`/`to_string()`. You've tested read and write against live
-  contracts already, so this is presumably fine — flagging only because strkey-encoding mistakes
-  are the kind of bug that's easy to miss until compared against Stellar Explorer.
+- Contract-address decoding (`ScVal::Address` → `C...` strkey in `deploy::create_contract_instance`
+  and `scval::to_address`) relies on `Address`'s `Display`/`to_string()`. You've tested read and
+  write against live contracts already, so this is presumably fine — flagging only because
+  strkey-encoding mistakes are the kind of bug that's easy to miss until compared against Stellar
+  Explorer.
+- `scval::to_bytes` / `scval::to_string_val` / `scval::to_symbol` assume the underlying XDR
+  wrapper types (`BytesM`, `StringM`) support `.to_vec()` via a slice `Deref`. Wasn't able to
+  compile-check this session (no Rust toolchain in this sandbox) — if `cargo build` flags it,
+  the fix is a one-line `.clone().into()` swap, same pattern already proven working in
+  `deploy::upload_wasm`.
 - Before running `cargo publish`, double check the `stellar-rust-client` name is still available
   on crates.io (didn't get a chance to verify this session) and that `cargo package --list` /
   `cargo publish --dry-run` doesn't pick up anything from `.env`, `BUILD_NOTES.md`'s reference
