@@ -4,16 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Reusable utils for Soroban contract execution: wasm upload, deploy, invoke, read."
 license = "MIT"
+readme = "README.md"
+keywords = ["stellar", "soroban", "blockchain", "smart-contracts"]
+categories = ["api-bindings", "cryptography::cryptocurrencies"]
 
 [dependencies]
-data-security = "0.3.0"
-secrecy = "0.10.3"
 soroban-client = "0.5"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 thiserror = "1"
 hex = "0.4"
-dotenvy = "0.15.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+dotenvy = "0.15.2"
+data-security = "0.3.0"
+secrecy = "0.10.3"

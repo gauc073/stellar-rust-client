@@ -1,5 +1,6 @@
 /target
 /data
+.env
 default.txt
 *.decrypted
 output.txt

@@ -1,4 +1,4 @@
-//! soroban-utils
+//! stellar-rust-client
 //!
 //! Reusable utilities for Soroban contract execution: upload WASM, deploy a
 //! contract instance, invoke a state-changing function, and read a value via
@@ -9,14 +9,14 @@
 //!
 //! Quick start:
 //! ```ignore
-//! use soroban_utils::{Client, NetworkConfig, LocalSigner};
+//! use stellar_rust_client::{Client, NetworkConfig, LocalSigner};
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let signer = LocalSigner::from_secret("S...")?;
 //!     let client = Client::new(NetworkConfig::testnet(), Box::new(signer))?;
 //!
-//!     let wasm = soroban_utils::wasm::read_wasm_file("./target/wasm32-unknown-unknown/release/my_contract.wasm")?;
+//!     let wasm = stellar_rust_client::wasm::read_wasm_file("./target/wasm32-unknown-unknown/release/my_contract.wasm")?;
 //!     let (contract_address, _wasm_hash) = client.deploy_contract(&wasm, vec![]).await?;
 //!
 //!     println!("deployed at {contract_address}");
@@ -38,6 +38,7 @@ pub mod wasm;
 pub use client::Client;
 pub use config::{NetworkConfig, PollConfig};
 pub use error::{Result, SorobanUtilsError};
+pub use invoke::InvokeOutcome;
 pub use signer::{LocalSigner, Signer};
 
 // Re-export the pieces of soroban-client that callers will need to

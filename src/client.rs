@@ -87,7 +87,7 @@ impl Client {
         contract_address: &str,
         function_name: &str,
         args: Vec<ScVal>,
-    ) -> Result<()> {
+    ) -> Result<crate::invoke::InvokeOutcome> {
         crate::invoke::invoke_contract(
             &self.server,
             &self.network.network_passphrase,
