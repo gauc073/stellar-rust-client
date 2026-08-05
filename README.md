@@ -224,10 +224,33 @@ let amount: i128 = utils::to_i128(&result)?;
 ```
 
 Namespaced under `utils::` rather than re-exported at the crate root, since names like
-`i128`/`u128`/`bool` would otherwise shadow Rust's own primitive types. This deliberately only
-covers primitives — `Vec`/`Map`/struct-shaped `ScVal`s are still on you via `soroban_client::xdr`
-directly, since a generic converter for those would just be a worse copy of what `soroban-client`
-already does.
+`i128`/`u128`/`bool` would otherwise shadow Rust's own primitive types.
+
+### `ScVal::Vec` support
+
+Two levels, depending on whether your vec is homogeneous:
+
+```rust
+// Homogeneous -- a Vec of one type. This is what you want most of the time
+// (a list of addresses, a list of amounts, a list of role names, ...).
+let arg = utils::vec_of_addresses(&["GABC...", "GDEF..."])?;
+let arg = utils::vec_of_u128(&[100, 200, 300])?;
+let decoded: Vec<String> = utils::to_vec_of_addresses(&result)?;
+let decoded: Vec<i128> = utils::to_vec_of_i128(&result)?;
+
+// A primitive type without a named wrapper yet: same idea via the generic
+// combinator, given a per-element encoder/decoder.
+let arg = utils::vec_of(&roles, |r| utils::symbol(r))?;
+let decoded: Vec<String> = utils::to_vec_of(&result, utils::to_symbol)?;
+
+// Mixed types, or you just want the raw ScVal elements back:
+let arg = utils::vec_val(vec![utils::address(a)?, utils::i128_val(1)])?;
+let elements: Vec<ScVal> = utils::to_vec_val(&result)?;
+```
+
+`ScVal::Map` and struct-shaped `ScVal`s still aren't covered — those are still on you via
+`soroban_client::xdr` directly, since a generic converter for those would just be a worse copy of
+what `soroban-client` already does.
 
 ## Known rough edges to check before relying on this in production
 

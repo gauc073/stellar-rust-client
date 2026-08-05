@@ -5,12 +5,17 @@
 //! `tests/` files in this repo).
 //!
 //! Deliberately narrow in scope: this covers the primitives every contract
-//! call needs (address, string, symbol, bytes, bool, and the integer
-//! widths), not a full generic XDR <-> native converter for arbitrary
-//! `Vec`/`Map`/struct-shaped `ScVal`s -- that's squarely `soroban-client`'s
-//! and `stellar-xdr`'s job, and duplicating it here would just be a worse
-//! copy. Reach for `soroban_client::xdr::ScVal` directly for anything more
-//! complex than what's below.
+//! call needs (address, string, symbol, bytes, bool, the integer widths),
+//! plus `ScVal::Vec` support for both mixed-type vecs (`vec_val`/
+//! `to_vec_val`, working in terms of raw `ScVal` elements) and homogeneous
+//! typed vecs (`vec_of_addresses`, `vec_of_u128`, `to_vec_of_i128`, etc.,
+//! working in terms of `Vec<T>` directly -- built on the generic
+//! `vec_of`/`to_vec_of` combinators, which take a per-element encoder/
+//! decoder if you need a primitive type without a named wrapper yet).
+//! `ScVal::Map` and struct-shaped `ScVal`s aren't covered -- say the word if
+//! you need `Map`, same shape of addition as `Vec` was. Reach for
+//! `soroban_client::xdr::ScVal` directly for anything more complex than
+//! that.
 //!
 //! Usage is namespaced under `utils::` rather than re-exported at the crate
 //! root, since names like `i128`/`u128`/`bool` would otherwise shadow the
@@ -18,7 +23,7 @@
 
 use crate::error::{Result, SorobanUtilsError};
 use soroban_client::address::{Address, AddressTrait};
-use soroban_client::xdr::{Int128Parts, ScString, ScSymbol, ScVal, UInt128Parts};
+use soroban_client::xdr::{Int128Parts, ScString, ScSymbol, ScVal, ScVec, UInt128Parts};
 
 fn xdr_err(context: &str, e: impl std::fmt::Debug) -> SorobanUtilsError {
     SorobanUtilsError::Xdr(format!("{context}: {e:?}"))
@@ -112,6 +117,76 @@ pub fn u128_val(value: u128) -> ScVal {
     let hi = u64::from_be_bytes(raw[0..8].try_into().expect("8 bytes"));
     let lo = u64::from_be_bytes(raw[8..16].try_into().expect("8 bytes"));
     ScVal::U128(UInt128Parts { hi, lo })
+}
+
+/// `ScVal::Vec` equivalent -- a Soroban `Vec<T>` argument/return value,
+/// built from an already-encoded `Vec<ScVal>` (mix element construction with
+/// the other `utils::` functions above, e.g.
+/// `utils::vec_val(vec![utils::address(a)?, utils::i128_val(1)])`).
+///
+/// An empty Rust `Vec` encodes as `ScVal::Vec(Some(ScVec(empty)))`, matching
+/// how the JS/TS SDK's `nativeToScVal([], { type: "vec" })` behaves --
+/// *not* `ScVal::Vec(None)`, which the protocol reserves for a genuinely
+/// absent/null vec (distinct from an empty one). See `to_vec_val` below for
+/// how that `None` case is handled on the way back out.
+pub fn vec_val(items: Vec<ScVal>) -> Result<ScVal> {
+    Ok(ScVal::Vec(Some(ScVec(items.try_into().map_err(|e| {
+        xdr_err("failed to encode Vec<ScVal> as ScVec", e)
+    })?))))
+}
+
+/// Encode a homogeneous Rust slice into `ScVal::Vec`, given a per-element
+/// encoder. This is what the typed `vec_of_*` wrappers below are built
+/// from -- reach for it directly for a primitive type that doesn't have a
+/// named wrapper yet, e.g. `utils::vec_of(&roles, |r| utils::symbol(r))`.
+pub fn vec_of<T>(items: &[T], mut encode: impl FnMut(&T) -> Result<ScVal>) -> Result<ScVal> {
+    let encoded = items.iter().map(&mut encode).collect::<Result<Vec<_>>>()?;
+    vec_val(encoded)
+}
+
+/// `Vec<&str>` (account/contract addresses) -> `ScVal::Vec`.
+pub fn vec_of_addresses(items: &[&str]) -> Result<ScVal> {
+    vec_of(items, |a| address(a))
+}
+
+/// `Vec<&str>` -> `ScVal::Vec` of `ScVal::String`.
+pub fn vec_of_strings(items: &[&str]) -> Result<ScVal> {
+    vec_of(items, |s| string(s))
+}
+
+/// `Vec<&str>` -> `ScVal::Vec` of `ScVal::Symbol`.
+pub fn vec_of_symbols(items: &[&str]) -> Result<ScVal> {
+    vec_of(items, |s| symbol(s))
+}
+
+/// `Vec<i128>` -> `ScVal::Vec` of `ScVal::I128`.
+pub fn vec_of_i128(items: &[i128]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(i128_val(*v)))
+}
+
+/// `Vec<u128>` -> `ScVal::Vec` of `ScVal::U128`.
+pub fn vec_of_u128(items: &[u128]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(u128_val(*v)))
+}
+
+/// `Vec<u64>` -> `ScVal::Vec` of `ScVal::U64`.
+pub fn vec_of_u64(items: &[u64]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(u64_val(*v)))
+}
+
+/// `Vec<i64>` -> `ScVal::Vec` of `ScVal::I64`.
+pub fn vec_of_i64(items: &[i64]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(i64_val(*v)))
+}
+
+/// `Vec<u32>` -> `ScVal::Vec` of `ScVal::U32`.
+pub fn vec_of_u32(items: &[u32]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(u32_val(*v)))
+}
+
+/// `Vec<i32>` -> `ScVal::Vec` of `ScVal::I32`.
+pub fn vec_of_i32(items: &[i32]) -> Result<ScVal> {
+    vec_of(items, |v| Ok(i32_val(*v)))
 }
 
 // ---------------------------------------------------------------------
@@ -208,4 +283,74 @@ pub fn to_u128(value: &ScVal) -> Result<u128> {
         }
         other => Err(type_mismatch("U128", other)),
     }
+}
+
+/// `ScVal::Vec` -> `Vec<ScVal>`. Elements are left as `ScVal` -- decode each
+/// one with the matching `to_*` function above once you know its shape
+/// (`ScVal` doesn't carry element-type info the way a typed Rust `Vec<T>`
+/// would).
+///
+/// `ScVal::Vec(None)` -- the protocol's "absent vec", distinct from an empty
+/// one -- decodes to an empty `Vec` here rather than erroring, since callers
+/// almost always want to treat "no vec" and "empty vec" the same way. Match
+/// on the raw `ScVal` yourself first if that distinction matters to you.
+pub fn to_vec_val(value: &ScVal) -> Result<Vec<ScVal>> {
+    match value {
+        ScVal::Vec(Some(v)) => Ok(v.0.to_vec()),
+        ScVal::Vec(None) => Ok(Vec::new()),
+        other => Err(type_mismatch("Vec", other)),
+    }
+}
+
+/// Decode `ScVal::Vec` into a homogeneous Rust `Vec<T>`, given a per-element
+/// decoder. Errors as soon as any element doesn't match what `decode`
+/// expects -- this is what the typed `to_vec_of_*` wrappers below are built
+/// from.
+pub fn to_vec_of<T>(value: &ScVal, mut decode: impl FnMut(&ScVal) -> Result<T>) -> Result<Vec<T>> {
+    to_vec_val(value)?.iter().map(&mut decode).collect()
+}
+
+/// `ScVal::Vec` of `ScVal::Address` -> `Vec<String>`.
+pub fn to_vec_of_addresses(value: &ScVal) -> Result<Vec<String>> {
+    to_vec_of(value, to_address)
+}
+
+/// `ScVal::Vec` of `ScVal::String` -> `Vec<String>`.
+pub fn to_vec_of_strings(value: &ScVal) -> Result<Vec<String>> {
+    to_vec_of(value, to_string_val)
+}
+
+/// `ScVal::Vec` of `ScVal::Symbol` -> `Vec<String>`.
+pub fn to_vec_of_symbols(value: &ScVal) -> Result<Vec<String>> {
+    to_vec_of(value, to_symbol)
+}
+
+/// `ScVal::Vec` of `ScVal::I128` -> `Vec<i128>`.
+pub fn to_vec_of_i128(value: &ScVal) -> Result<Vec<i128>> {
+    to_vec_of(value, to_i128)
+}
+
+/// `ScVal::Vec` of `ScVal::U128` -> `Vec<u128>`.
+pub fn to_vec_of_u128(value: &ScVal) -> Result<Vec<u128>> {
+    to_vec_of(value, to_u128)
+}
+
+/// `ScVal::Vec` of `ScVal::U64` -> `Vec<u64>`.
+pub fn to_vec_of_u64(value: &ScVal) -> Result<Vec<u64>> {
+    to_vec_of(value, to_u64)
+}
+
+/// `ScVal::Vec` of `ScVal::I64` -> `Vec<i64>`.
+pub fn to_vec_of_i64(value: &ScVal) -> Result<Vec<i64>> {
+    to_vec_of(value, to_i64)
+}
+
+/// `ScVal::Vec` of `ScVal::U32` -> `Vec<u32>`.
+pub fn to_vec_of_u32(value: &ScVal) -> Result<Vec<u32>> {
+    to_vec_of(value, to_u32)
+}
+
+/// `ScVal::Vec` of `ScVal::I32` -> `Vec<i32>`.
+pub fn to_vec_of_i32(value: &ScVal) -> Result<Vec<i32>> {
+    to_vec_of(value, to_i32)
 }

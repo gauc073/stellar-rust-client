@@ -50,6 +50,9 @@ async fn checks_has_role_across_contracts() {
             println!(
                 "For Contract {contract_address} ({contract_name}), User {account} {status} Role {role}"
             );
+            // let env = Env::default();
+            // let host_val: soroban_sdk::Val = soroban_sdk::Val::try_from_val(&env, &sc_val).unwrap();
+            // let val: StakingStruct = StakingStruct::try_from_val(&env, &host_val).unwrap();
         }
     }
 }

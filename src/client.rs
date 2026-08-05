@@ -115,6 +115,83 @@ impl Client {
         .await
     }
 
+    /// Extend the TTL of a single contract storage entry so it stays live
+    /// at least until ledger `extend_to`.
+    ///
+    /// `mapping_name` + `details` build the storage key the same way a
+    /// `#[contracttype] enum DataKey { <mapping_name>(..details) }` variant
+    /// would serialize (see `ttl::mapping_entry_key`) -- pass an empty
+    /// `details` for a bare-symbol key. `durability` must match how the
+    /// contract wrote the entry (`Persistent` vs `Temporary`). For a raw
+    /// `ScVal` key that doesn't fit that compound shape, call
+    /// `ttl::extend_ttl` directly instead of going through this wrapper.
+    pub async fn extend_ttl(
+        &self,
+        contract_address: &str,
+        mapping_name: &str,
+        details: Vec<ScVal>,
+        durability: crate::ttl::Durability,
+        extend_to: u32,
+    ) -> Result<crate::invoke::InvokeOutcome> {
+        let signer = self.signer_factory.build_signer().await?;
+        let storage_key = crate::ttl::mapping_entry_key(mapping_name, details)?;
+        crate::ttl::extend_ttl(
+            &self.server,
+            &self.network.network_passphrase,
+            signer.as_ref(),
+            contract_address,
+            storage_key,
+            durability,
+            extend_to,
+            self.poll_cfg,
+        )
+        .await
+    }
+
+    /// Extend the TTL of a contract's **instance storage** -- the single
+    /// entry backing every `env.storage().instance()` key on that contract.
+    /// There's only one such entry per contract (all `.instance()` values
+    /// live inside it), so unlike `extend_ttl` there's no mapping
+    /// name/details/durability to pass -- see the `ttl` module docs for how
+    /// this differs from per-key persistent/temporary entries.
+    pub async fn extend_instance_ttl(
+        &self,
+        contract_address: &str,
+        extend_to: u32,
+    ) -> Result<crate::invoke::InvokeOutcome> {
+        let signer = self.signer_factory.build_signer().await?;
+        crate::ttl::extend_instance_ttl(
+            &self.server,
+            &self.network.network_passphrase,
+            signer.as_ref(),
+            contract_address,
+            extend_to,
+            self.poll_cfg,
+        )
+        .await
+    }
+
+    /// Extend the TTL of an uploaded Wasm **code** entry -- keyed by the
+    /// 32-byte hash `upload_wasm`/`deploy_contract` returned, not a contract
+    /// address. Every contract instance deployed from the same wasm shares
+    /// this one entry and its one TTL.
+    pub async fn extend_wasm_ttl(
+        &self,
+        wasm_hash: [u8; 32],
+        extend_to: u32,
+    ) -> Result<crate::invoke::InvokeOutcome> {
+        let signer = self.signer_factory.build_signer().await?;
+        crate::ttl::extend_wasm_ttl(
+            &self.server,
+            &self.network.network_passphrase,
+            signer.as_ref(),
+            wasm_hash,
+            extend_to,
+            self.poll_cfg,
+        )
+        .await
+    }
+
     pub async fn read_contract(
         &self,
         contract_address: &str,

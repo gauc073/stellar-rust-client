@@ -34,6 +34,7 @@ pub mod invoke;
 pub mod poll;
 pub mod read;
 pub mod signer;
+pub mod ttl;
 pub mod txbuilder;
 pub mod utils;
 pub mod wasm;
@@ -43,6 +44,7 @@ pub use config::{NetworkConfig, PollConfig};
 pub use error::{Result, SorobanUtilsError};
 pub use invoke::InvokeOutcome;
 pub use signer::{LocalSigner, Signer, SignerConfig, SignerFactory};
+pub use ttl::Durability;
 
 // Re-export the pieces of soroban-client that callers will need to
 // construct arguments (ScVal) and interpret results, so downstream crates
