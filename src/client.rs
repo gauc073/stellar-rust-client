@@ -192,6 +192,22 @@ impl Client {
         .await
     }
 
+    /// Look up the wasm hash a deployed contract instance runs, by reading
+    /// its instance-storage entry. `Ok(None)` means the contract has no
+    /// instance entry (doesn't exist / archived) or isn't backed by a
+    /// separately-expiring wasm entry at all. Read-only -- no signer needed.
+    pub async fn wasm_hash_of(&self, contract_address: &str) -> Result<Option<[u8; 32]>> {
+        crate::ttl::wasm_hash_of(&self.server, contract_address).await
+    }
+
+    /// Current TTL (`live_until_ledger_seq`) of a wasm code entry. `Ok(None)`
+    /// means the entry doesn't exist -- never uploaded, or expired and
+    /// archived (`extend_wasm_ttl` handles the archived case automatically
+    /// if you go on to extend it). Read-only -- no signer needed.
+    pub async fn wasm_ttl(&self, wasm_hash: [u8; 32]) -> Result<Option<u32>> {
+        crate::ttl::wasm_ttl(&self.server, wasm_hash).await
+    }
+
     pub async fn read_contract(
         &self,
         contract_address: &str,

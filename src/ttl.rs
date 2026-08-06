@@ -67,8 +67,9 @@ use soroban_client::transaction::{
     Transaction, TransactionBehavior, TransactionBuilder, TransactionBuilderBehavior,
 };
 use soroban_client::xdr::{
-    ContractDataDurability, Hash, LedgerFootprint, LedgerKey, LedgerKeyContractCode,
-    LedgerKeyContractData, SorobanResources, SorobanTransactionData, SorobanTransactionDataExt,
+    ContractDataDurability, ContractExecutable, Hash, LedgerEntryData, LedgerFootprint, LedgerKey,
+    LedgerKeyContractCode, LedgerKeyContractData, SorobanResources, SorobanTransactionData,
+    SorobanTransactionDataExt,
 };
 
 pub use soroban_client::transaction::ScVal;
@@ -79,6 +80,107 @@ pub use soroban_client::xdr::ContractDataDurability as Durability;
 /// keyed by this, not a per-key entry like `.persistent()`/`.temporary()`.
 pub fn instance_key() -> ScVal {
     ScVal::LedgerKeyContractInstance
+}
+
+/// Hex-encode a 32-byte wasm hash (`upload_wasm`'s return type), matching
+/// how Stellar tooling (soroban-cli, explorers) displays it everywhere.
+pub fn wasm_hash_to_hex(wasm_hash: [u8; 32]) -> String {
+    hex::encode(wasm_hash)
+}
+
+/// Parse a hex-encoded wasm hash back into the `[u8; 32]` every wasm-TTL
+/// function here takes. Reverse of `wasm_hash_to_hex`.
+pub fn wasm_hash_from_hex(hex_str: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| SorobanUtilsError::Xdr(format!("invalid hex wasm hash: {e}")))?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        SorobanUtilsError::Xdr(format!(
+            "wasm hash must be 32 bytes, got {} (input: {hex_str})",
+            bytes.len()
+        ))
+    })
+}
+
+/// Build the `LedgerKey::ContractCode` entry for a wasm hash -- the key
+/// `extend_wasm_ttl` and `wasm_ttl` both extend/read. Exposed on its own so
+/// callers that need the raw `LedgerKey` (e.g. to batch it into their own
+/// `get_ledger_entries` call) don't have to duplicate this.
+pub fn wasm_ledger_key(wasm_hash: [u8; 32]) -> LedgerKey {
+    LedgerKey::ContractCode(LedgerKeyContractCode {
+        hash: Hash(wasm_hash),
+    })
+}
+
+/// The reverse of `wasm_ledger_key`: given a contract's instance-storage
+/// entry, pull out the wasm hash it points at. Every contract instance
+/// stores which wasm it runs as part of its `ContractInstance` value, so
+/// this is how you go from "a contract address" to "the wasm-code TTL I
+/// should also be watching" -- exactly the lookup `discover_wasm_hash` in a
+/// hand-rolled monitoring daemon would otherwise reimplement via manual XDR
+/// parsing.
+///
+/// Returns `Ok(None)` if the contract has no instance entry (nonexistent or
+/// archived contract) or if it's a native/host-function contract rather
+/// than a deployed wasm one -- both are "no wasm hash to watch", not errors.
+pub async fn wasm_hash_of(server: &Server, contract_address: &str) -> Result<Option<[u8; 32]>> {
+    let entry = server
+        .get_contract_data(
+            contract_address,
+            instance_key(),
+            soroban_client::Durability::Persistent,
+        )
+        .await;
+
+    let entry = match entry {
+        Ok(entry) => entry,
+        Err(RpcError::ContractDataNotFound) => return Ok(None),
+        Err(e) => return Err(SorobanUtilsError::Rpc(e.to_string())),
+    };
+
+    let LedgerEntryData::ContractData(data) = entry.to_data() else {
+        return Ok(None);
+    };
+    let ScVal::ContractInstance(instance) = data.val else {
+        return Ok(None);
+    };
+    let ContractExecutable::Wasm(hash) = instance.executable else {
+        // `ContractExecutable::StellarAsset` or similar -- not backed by a
+        // separately-expiring wasm entry.
+        return Ok(None);
+    };
+
+    Ok(Some(hash.0))
+}
+
+/// Read the current `live_until_ledger_seq` for one ledger entry, given its
+/// exact `LedgerKey` -- works for any of the three TTL surfaces this module
+/// extends (`ContractData` for a persistent/temporary entry or the
+/// instance, `ContractCode` for wasm), unlike `Server::get_contract_data`
+/// which is `ContractData`-only. This is the generalized, reusable form of
+/// the ad hoc "before"/"after" check `write_extend_ttl.rs` does inline.
+///
+/// Returns `Ok(None)` for an entry that doesn't exist -- either never
+/// written, or expired and archived. Both look identical from RPC's side
+/// (`getLedgerEntries` just omits the key from the response), so this
+/// deliberately doesn't try to distinguish them; if you need to tell "never
+/// existed" apart from "archived", that's what attempting `extend_ttl` and
+/// checking for `RestorationRequired` is for.
+pub async fn live_until_ledger(server: &Server, ledger_key: LedgerKey) -> Result<Option<u32>> {
+    let response = server
+        .get_ledger_entries(vec![ledger_key])
+        .await
+        .map_err(|e| SorobanUtilsError::Rpc(e.to_string()))?;
+
+    Ok(response
+        .entries
+        .and_then(|entries| entries.into_iter().next())
+        .and_then(|entry| entry.live_until_ledger_seq))
+}
+
+/// Convenience: current TTL of a wasm code entry, given its 32-byte hash.
+/// `live_until_ledger(server, wasm_ledger_key(wasm_hash))` spelled out.
+pub async fn wasm_ttl(server: &Server, wasm_hash: [u8; 32]) -> Result<Option<u32>> {
+    live_until_ledger(server, wasm_ledger_key(wasm_hash)).await
 }
 
 /// Build the storage key for a `#[contracttype] enum DataKey { Mapping(K1,
@@ -198,15 +300,11 @@ pub async fn extend_wasm_ttl(
     extend_to: u32,
     poll_cfg: PollConfig,
 ) -> Result<InvokeOutcome> {
-    let ledger_key = LedgerKey::ContractCode(LedgerKeyContractCode {
-        hash: Hash(wasm_hash),
-    });
-
     extend_ledger_key_ttl(
         server,
         network_passphrase,
         signer,
-        ledger_key,
+        wasm_ledger_key(wasm_hash),
         extend_to,
         poll_cfg,
     )
@@ -388,6 +486,49 @@ fn build_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `wasm_hash_from_hex(wasm_hash_to_hex(h)) == h` for a real 32-byte
+    /// hash -- the pair of functions daemons/monitoring code use to move a
+    /// wasm hash between "what `upload_wasm` returns" and "what's readable
+    /// in logs/a database/config".
+    #[test]
+    fn wasm_hash_hex_round_trips() {
+        let hash = [0x42u8; 32];
+        let hex_str = wasm_hash_to_hex(hash);
+        assert_eq!(hex_str.len(), 64, "32 bytes should hex-encode to 64 chars");
+        assert_eq!(wasm_hash_from_hex(&hex_str).expect("valid hex"), hash);
+    }
+
+    /// Wrong-length hex (truncated, or a strkey/address pasted by mistake)
+    /// must error, not silently pad/truncate into a wrong-but-valid-looking
+    /// hash that then extends/reads the wrong ledger entry.
+    #[test]
+    fn wasm_hash_from_hex_rejects_wrong_length() {
+        assert!(wasm_hash_from_hex("deadbeef").is_err());
+        assert!(wasm_hash_from_hex(&"ab".repeat(31)).is_err());
+        assert!(wasm_hash_from_hex(&"ab".repeat(33)).is_err());
+    }
+
+    /// Non-hex characters must error too, not just wrong length.
+    #[test]
+    fn wasm_hash_from_hex_rejects_invalid_hex() {
+        assert!(wasm_hash_from_hex(&"zz".repeat(32)).is_err());
+    }
+
+    /// `wasm_ledger_key` must build a `ContractCode` key, not the
+    /// `ContractData` shape everything else in this module uses -- these
+    /// are genuinely different `LedgerKey` variants and mixing them up
+    /// silently produces a key for an entry that doesn't exist.
+    #[test]
+    fn wasm_ledger_key_is_contract_code_variant() {
+        let hash = [0x11u8; 32];
+        match wasm_ledger_key(hash) {
+            LedgerKey::ContractCode(LedgerKeyContractCode { hash: Hash(h) }) => {
+                assert_eq!(h, hash);
+            }
+            other => panic!("expected LedgerKey::ContractCode, got {other:?}"),
+        }
+    }
 
     /// `mapping_entry_key` must encode to exactly what a Rust-SDK
     /// `#[contracttype] enum DataKey { Balance(Address) }` produces on the
