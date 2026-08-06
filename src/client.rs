@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::signer::{SignerConfig, SignerFactory};
 use soroban_client::transaction::ScVal;
 use soroban_client::{Options, Server};
+use stellar_baselib::account::AccountBehavior;
 
 /// Top-level entry point. Holds the RPC connection, network config, and a
 /// `SignerFactory` -- not a `Signer` directly. Roughly equivalent to
@@ -206,6 +207,26 @@ impl Client {
     /// if you go on to extend it). Read-only -- no signer needed.
     pub async fn wasm_ttl(&self, wasm_hash: [u8; 32]) -> Result<Option<u32>> {
         crate::ttl::wasm_ttl(&self.server, wasm_hash).await
+    }
+
+    /// Sequence number of the latest ledger known to the connected RPC node.
+    /// Read-only -- no signer needed.
+    pub async fn latest_ledger(&self) -> Result<u32> {
+        Ok(self.server.get_latest_ledger().await?.sequence)
+    }
+
+    /// Current sequence number of an account, as tracked on-ledger (i.e. the
+    /// value the *next* transaction from this account must use +1). Pass
+    /// `self.public_key()` for this client's own account, or any other
+    /// account's public key. Read-only -- no signer needed.
+    pub async fn account_sequence(&self, account_id: &str) -> Result<i64> {
+        let account = self.server.get_account(account_id).await?;
+        account
+            .sequence_number()
+            .parse()
+            .map_err(|e| crate::error::SorobanUtilsError::Rpc(format!(
+                "malformed account sequence number: {e}"
+            )))
     }
 
     pub async fn read_contract(

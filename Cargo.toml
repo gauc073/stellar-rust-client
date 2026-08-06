@@ -1,6 +1,6 @@
 [package]
 name = "stellar-rust-client"
-version = "0.3.0-rc.2"
+version = "0.3.0-rc.3"
 edition = "2024"
 description = "Reusable utils for Soroban contract execution: wasm upload, deploy, invoke, read."
 license = "MIT"
@@ -12,6 +12,7 @@ categories = ["api-bindings", "cryptography::cryptocurrencies"]
 
 [dependencies]
 soroban-client = "0.5"
+stellar-baselib = "0.5.8"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 thiserror = "1"
